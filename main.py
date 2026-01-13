@@ -10,6 +10,11 @@ from typing import Optional, List
 from homeharvest import scrape_property
 import pandas as pd
 from enum import Enum
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Dock Property API",
@@ -123,6 +128,15 @@ def parse_alt_photos(value) -> Optional[List[str]]:
 
 def df_row_to_property(row) -> PropertyResponse:
     """Convert a DataFrame row to PropertyResponse"""
+    # Handle bathrooms - might be full_baths + half_baths or just baths
+    bathrooms = None
+    if row.get("full_baths") is not None:
+        full = safe_float(row.get("full_baths")) or 0
+        half = safe_float(row.get("half_baths")) or 0
+        bathrooms = full + (half * 0.5)
+    else:
+        bathrooms = safe_float(row.get("baths"))
+    
     return PropertyResponse(
         address=safe_str(row.get("street")),
         city=safe_str(row.get("city")),
@@ -132,7 +146,7 @@ def df_row_to_property(row) -> PropertyResponse:
         longitude=safe_float(row.get("longitude")),
         price=safe_float(row.get("list_price")),
         bedrooms=safe_int(row.get("beds")),
-        bathrooms=safe_float(row.get("full_baths", 0) or 0) + safe_float(row.get("half_baths", 0) or 0) * 0.5 if row.get("full_baths") is not None else safe_float(row.get("baths")),
+        bathrooms=bathrooms,
         sqft=safe_int(row.get("sqft")),
         lot_sqft=safe_int(row.get("lot_sqft")),
         year_built=safe_int(row.get("year_built")),
@@ -157,6 +171,16 @@ def df_row_to_property(row) -> PropertyResponse:
         stories=safe_int(row.get("stories")),
         parking_garage=safe_int(row.get("parking_garage")),
     )
+
+
+def safe_scrape(params: dict) -> Optional[pd.DataFrame]:
+    """Safely scrape properties, returning None on any error"""
+    try:
+        df = scrape_property(**params)
+        return df
+    except Exception as e:
+        logger.warning(f"Scrape failed for params {params}: {str(e)}")
+        return None
 
 
 @app.get("/")
@@ -196,54 +220,54 @@ async def search_properties(
     """
     Search for properties by location with optional filters.
     """
-    try:
-        # Build scrape parameters
-        params = {
-            "location": location,
-            "listing_type": listing_type.value,
-        }
+    logger.info(f"Search request: location={location}, listing_type={listing_type.value}")
+    
+    # Build scrape parameters
+    params = {
+        "location": location,
+        "listing_type": listing_type.value,
+    }
+    
+    if site:
+        params["site_name"] = site.value
+    
+    if past_days:
+        params["past_days"] = past_days
         
-        if site:
-            params["site_name"] = site.value
+    # Add price filters
+    if min_price or max_price:
+        params["min_price"] = min_price
+        params["max_price"] = max_price
         
-        if past_days:
-            params["past_days"] = past_days
-            
-        # Add price filters
-        if min_price or max_price:
-            params["min_price"] = min_price
-            params["max_price"] = max_price
-            
-        # Add bed filters
-        if min_beds or max_beds:
-            params["min_beds"] = min_beds
-            params["max_beds"] = max_beds
-            
-        # Add bath filter
-        if min_baths:
-            params["min_baths"] = min_baths
-            
-        # Add sqft filters
-        if min_sqft or max_sqft:
-            params["min_sqft"] = min_sqft
-            params["max_sqft"] = max_sqft
+    # Add bed filters
+    if min_beds or max_beds:
+        params["min_beds"] = min_beds
+        params["max_beds"] = max_beds
         
-        # Scrape properties
-        df = scrape_property(**params)
+    # Add bath filter
+    if min_baths:
+        params["min_baths"] = min_baths
         
-        if df is None or df.empty:
-            return SearchResponse(count=0, properties=[])
-        
-        # Limit results
-        df = df.head(limit)
-        
-        # Convert to response
-        properties = [df_row_to_property(row) for _, row in df.iterrows()]
-        
-        return SearchResponse(count=len(properties), properties=properties)
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching properties: {str(e)}")
+    # Add sqft filters
+    if min_sqft or max_sqft:
+        params["min_sqft"] = min_sqft
+        params["max_sqft"] = max_sqft
+    
+    # Scrape properties with error handling
+    df = safe_scrape(params)
+    
+    if df is None or df.empty:
+        logger.info(f"No properties found for {location}")
+        return SearchResponse(count=0, properties=[])
+    
+    # Limit results
+    df = df.head(limit)
+    
+    # Convert to response
+    properties = [df_row_to_property(row) for _, row in df.iterrows()]
+    
+    logger.info(f"Found {len(properties)} properties for {location}")
+    return SearchResponse(count=len(properties), properties=properties)
 
 
 @app.get("/property", response_model=PropertyResponse)
@@ -254,32 +278,30 @@ async def get_property_by_address(
     """
     Get a specific property by its address.
     """
-    try:
-        params = {
-            "location": address,
-            "listing_type": "for_sale",
-        }
+    logger.info(f"Property request: address={address}")
+    
+    params = {
+        "location": address,
+        "listing_type": "for_sale",
+    }
+    
+    if site:
+        params["site_name"] = site.value
+    
+    df = safe_scrape(params)
+    
+    if df is None or df.empty:
+        # Try sold listings
+        logger.info(f"No for_sale listings, trying sold for {address}")
+        params["listing_type"] = "sold"
+        df = safe_scrape(params)
         
-        if site:
-            params["site_name"] = site.value
-        
-        df = scrape_property(**params)
-        
-        if df is None or df.empty:
-            # Try sold listings
-            params["listing_type"] = "sold"
-            df = scrape_property(**params)
-            
-        if df is None or df.empty:
-            raise HTTPException(status_code=404, detail="Property not found")
-        
-        # Return first matching property
-        return df_row_to_property(df.iloc[0])
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching property: {str(e)}")
+    if df is None or df.empty:
+        logger.info(f"Property not found: {address}")
+        raise HTTPException(status_code=404, detail="Property not found")
+    
+    logger.info(f"Found property: {address}")
+    return df_row_to_property(df.iloc[0])
 
 
 @app.get("/property/url", response_model=PropertyResponse)
@@ -290,85 +312,74 @@ async def get_property_by_url(
     Get property details from a listing URL.
     This extracts the address from the URL and searches for it.
     """
-    try:
-        # Extract location from URL - HomeHarvest can work with URLs directly in some cases
-        # For now, we'll try to parse common URL patterns
+    logger.info(f"URL request: url={url}")
+    
+    # Determine source from URL
+    site = None
+    if "zillow.com" in url.lower():
+        site = SiteSource.zillow
+    elif "redfin.com" in url.lower():
+        site = SiteSource.redfin
+    elif "realtor.com" in url.lower():
+        site = SiteSource.realtor
         
-        # Determine source from URL
-        site = None
-        if "zillow.com" in url.lower():
-            site = SiteSource.zillow
-        elif "redfin.com" in url.lower():
-            site = SiteSource.redfin
-        elif "realtor.com" in url.lower():
-            site = SiteSource.realtor
+    # Try to extract address from URL path
+    import re
+    from urllib.parse import urlparse, unquote
+    
+    parsed = urlparse(url)
+    path = unquote(parsed.path)
+    
+    # Try various extraction patterns
+    address_parts = []
+    
+    # Zillow pattern
+    zillow_match = re.search(r'/homedetails/([^/]+)/', path)
+    if zillow_match:
+        addr = zillow_match.group(1).replace('-', ' ')
+        # Remove zpid suffix if present
+        addr = re.sub(r'\s+\d+$', '', addr)
+        address_parts = [addr]
+        
+    # Redfin pattern
+    if not address_parts:
+        redfin_match = re.search(r'/([A-Z]{2})/([^/]+)/(\d{5})/([^/]+)', path)
+        if redfin_match:
+            state, city, zipcode, street = redfin_match.groups()
+            address_parts = [f"{street.replace('-', ' ')}, {city}, {state} {zipcode}"]
             
-        # Try to extract address from URL path
-        # Common patterns:
-        # Zillow: /homedetails/123-Main-St-Austin-TX-78701/12345_zpid/
-        # Redfin: /TX/Austin/78701/123-Main-St
-        # Realtor: /realestateandhomes-detail/123-Main-St_Austin_TX_78701
+    # Realtor pattern
+    if not address_parts:
+        realtor_match = re.search(r'/([^_]+)_([^_]+)_([A-Z]{2})_(\d{5})', path)
+        if realtor_match:
+            street, city, state, zipcode = realtor_match.groups()
+            address_parts = [f"{street.replace('-', ' ')}, {city}, {state} {zipcode}"]
+    
+    if not address_parts:
+        raise HTTPException(status_code=400, detail="Could not parse address from URL")
         
-        import re
-        from urllib.parse import urlparse, unquote
+    location = address_parts[0]
+    logger.info(f"Extracted location from URL: {location}")
+    
+    # Search for the property
+    params = {
+        "location": location,
+        "listing_type": "for_sale",
+    }
+    
+    if site:
+        params["site_name"] = site.value
         
-        parsed = urlparse(url)
-        path = unquote(parsed.path)
+    df = safe_scrape(params)
+    
+    if df is None or df.empty:
+        params["listing_type"] = "sold"
+        df = safe_scrape(params)
         
-        # Try various extraction patterns
-        address_parts = []
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail="Property not found")
         
-        # Zillow pattern
-        zillow_match = re.search(r'/homedetails/([^/]+)/', path)
-        if zillow_match:
-            addr = zillow_match.group(1).replace('-', ' ')
-            # Remove zpid suffix if present
-            addr = re.sub(r'\s+\d+$', '', addr)
-            address_parts = [addr]
-            
-        # Redfin pattern
-        if not address_parts:
-            redfin_match = re.search(r'/([A-Z]{2})/([^/]+)/(\d{5})/([^/]+)', path)
-            if redfin_match:
-                state, city, zipcode, street = redfin_match.groups()
-                address_parts = [f"{street.replace('-', ' ')}, {city}, {state} {zipcode}"]
-                
-        # Realtor pattern
-        if not address_parts:
-            realtor_match = re.search(r'/([^_]+)_([^_]+)_([A-Z]{2})_(\d{5})', path)
-            if realtor_match:
-                street, city, state, zipcode = realtor_match.groups()
-                address_parts = [f"{street.replace('-', ' ')}, {city}, {state} {zipcode}"]
-        
-        if not address_parts:
-            raise HTTPException(status_code=400, detail="Could not parse address from URL")
-            
-        location = address_parts[0]
-        
-        # Search for the property
-        params = {
-            "location": location,
-            "listing_type": "for_sale",
-        }
-        
-        if site:
-            params["site_name"] = site.value
-            
-        df = scrape_property(**params)
-        
-        if df is None or df.empty:
-            params["listing_type"] = "sold"
-            df = scrape_property(**params)
-            
-        if df is None or df.empty:
-            raise HTTPException(status_code=404, detail="Property not found")
-            
-        return df_row_to_property(df.iloc[0])
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching property: {str(e)}")
+    return df_row_to_property(df.iloc[0])
 
 
 if __name__ == "__main__":
