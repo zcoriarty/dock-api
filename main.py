@@ -114,11 +114,16 @@ def safe_str(value) -> Optional[str]:
     return s if s else None
 
 
-def get_nested(data: Dict, *keys, default=None):
-    """Safely get nested dictionary values"""
+def get_nested(data, *keys, default=None):
+    """Safely get nested dictionary/list values. Supports both dict keys and list indices."""
     for key in keys:
         if isinstance(data, dict):
             data = data.get(key)
+        elif isinstance(data, list) and isinstance(key, int):
+            if 0 <= key < len(data):
+                data = data[key]
+            else:
+                return default
         else:
             return default
         if data is None:
@@ -144,18 +149,45 @@ def extract_photo_url(photo_value) -> Optional[str]:
 
 
 def raw_property_to_response(prop: Dict) -> PropertyResponse:
-    """Convert a raw property dict (from return_type='raw') to PropertyResponse"""
-    # Handle bathrooms - might be full_baths + half_baths
-    full_baths = safe_float(prop.get("full_baths")) or 0
-    half_baths = safe_float(prop.get("half_baths")) or 0
-    bathrooms = full_baths + (half_baths * 0.5) if (full_baths or half_baths) else None
+    """Convert a raw property dict (from return_type='raw') to PropertyResponse
+    
+    The raw format from HomeHarvest follows the Realtor.com API structure with nested objects:
+    - location: contains address info (address.line, address.city, etc.)
+    - description: contains property details (beds, baths, sqft, year_built, etc.)
+    - primary_photo: photo info
+    - list_price: listing price
+    """
+    # Extract nested structures - realtor.com raw format uses 'description' for property details
+    # and 'location' for address info
+    location = prop.get("location") or {}
+    address_info = location.get("address") or {} if isinstance(location, dict) else {}
+    coordinate = address_info.get("coordinate") or {} if isinstance(address_info, dict) else {}
+    
+    # 'description' in raw format contains property details (beds, baths, sqft, etc.)
+    # This is confusing but it's how the realtor.com API works
+    details = prop.get("description") or {}
+    if not isinstance(details, dict):
+        details = {}
+    
+    # Handle bathrooms - might be full_baths + half_baths or just baths
+    # Try nested structure first, then fall back to flat structure
+    full_baths = safe_float(details.get("baths_full")) or safe_float(prop.get("full_baths")) or 0
+    half_baths = safe_float(details.get("baths_half")) or safe_float(prop.get("half_baths")) or 0
+    total_baths = safe_float(details.get("baths")) or safe_float(prop.get("baths"))
+    
+    if total_baths:
+        bathrooms = total_baths
+    elif full_baths or half_baths:
+        bathrooms = full_baths + (half_baths * 0.5)
+    else:
+        bathrooms = None
     
     # Get primary photo - extract URL from dict if needed
     raw_primary_photo = prop.get("primary_photo")
     primary_photo = extract_photo_url(raw_primary_photo)
     
-    # Get alt photos as list - each may be a dict with 'href'
-    raw_alt_photos = prop.get("alt_photos")
+    # Get alt photos from 'photos' array - each may be a dict with 'href'
+    raw_alt_photos = prop.get("photos") or prop.get("alt_photos")
     alt_photos = None
     if raw_alt_photos and isinstance(raw_alt_photos, list):
         alt_photos = [url for p in raw_alt_photos if (url := extract_photo_url(p))]
@@ -164,39 +196,70 @@ def raw_property_to_response(prop: Dict) -> PropertyResponse:
     # Log photo info for debugging
     logger.info(f"Property photos - primary_url: {primary_photo[:80] if primary_photo else 'None'}, alt_count: {len(alt_photos) if alt_photos else 0}")
     
+    # Extract address - try nested location.address first, then flat fields
+    street = safe_str(address_info.get("line")) or safe_str(prop.get("street"))
+    city = safe_str(address_info.get("city")) or safe_str(prop.get("city"))
+    state = safe_str(address_info.get("state_code")) or safe_str(address_info.get("state")) or safe_str(prop.get("state"))
+    zip_code = safe_str(address_info.get("postal_code")) or safe_str(prop.get("zip_code"))
+    
+    # Extract coordinates
+    latitude = safe_float(coordinate.get("lat")) or safe_float(prop.get("latitude"))
+    longitude = safe_float(coordinate.get("lon")) or safe_float(prop.get("longitude"))
+    
+    # Extract property details - try nested 'description' first, then flat fields
+    beds = safe_int(details.get("beds")) or safe_int(prop.get("beds"))
+    sqft = safe_int(details.get("sqft")) or safe_int(prop.get("sqft"))
+    lot_sqft = safe_int(details.get("lot_sqft")) or safe_int(prop.get("lot_sqft"))
+    year_built = safe_int(details.get("year_built")) or safe_int(prop.get("year_built"))
+    stories = safe_int(details.get("stories")) or safe_int(prop.get("stories"))
+    garage = safe_int(details.get("garage")) or safe_int(prop.get("garage"))
+    property_type = safe_str(details.get("type")) or safe_str(prop.get("style"))
+    
+    # Extract HOA fee - might be in nested 'hoa' object
+    hoa_info = prop.get("hoa") or {}
+    hoa_fee = safe_float(hoa_info.get("fee")) if isinstance(hoa_info, dict) else safe_float(prop.get("hoa_fee"))
+    
+    # Build listing URL from href or permalink
+    listing_url = safe_str(prop.get("href")) or safe_str(prop.get("permalink")) or safe_str(prop.get("property_url"))
+    if listing_url and not listing_url.startswith("http"):
+        listing_url = f"https://www.realtor.com{listing_url}"
+    
+    # Get description text
+    desc_text = safe_str(details.get("text")) or safe_str(prop.get("text"))
+    
     return PropertyResponse(
-        address=safe_str(prop.get("street")),
-        city=safe_str(prop.get("city")),
-        state=safe_str(prop.get("state")),
-        zip_code=safe_str(prop.get("zip_code")),
-        latitude=safe_float(prop.get("latitude")),
-        longitude=safe_float(prop.get("longitude")),
+        address=street,
+        city=city,
+        state=state,
+        zip_code=zip_code,
+        latitude=latitude,
+        longitude=longitude,
         price=safe_float(prop.get("list_price")),
-        bedrooms=safe_int(prop.get("beds")),
+        bedrooms=beds,
         bathrooms=bathrooms,
-        sqft=safe_int(prop.get("sqft")),
-        lot_sqft=safe_int(prop.get("lot_sqft")),
-        year_built=safe_int(prop.get("year_built")),
-        property_type=safe_str(prop.get("style")),
+        sqft=sqft,
+        lot_sqft=lot_sqft,
+        year_built=year_built,
+        property_type=property_type,
         price_per_sqft=safe_float(prop.get("price_per_sqft")),
-        hoa_fee=safe_float(prop.get("hoa_fee")),
+        hoa_fee=hoa_fee,
         days_on_mls=safe_int(prop.get("days_on_mls")),
         list_date=safe_str(prop.get("list_date")),
-        sold_price=safe_float(prop.get("sold_price")),
+        sold_price=safe_float(prop.get("sold_price")) or safe_float(prop.get("last_sold_price")),
         last_sold_date=safe_str(prop.get("last_sold_date")),
         assessed_value=safe_float(prop.get("tax_assessed_value")),
-        estimated_value=safe_float(prop.get("estimated_value")),
-        mls_id=safe_str(prop.get("mls_id")),
-        listing_url=safe_str(prop.get("property_url")),
+        estimated_value=safe_float(get_nested(prop, "estimates", "estimate", "value")),
+        mls_id=safe_str(prop.get("mls_id")) or safe_str(prop.get("listing_id")),
+        listing_url=listing_url,
         primary_photo=primary_photo,
         alt_photos=alt_photos,
-        source=safe_str(prop.get("mls")),
+        source=safe_str(get_nested(prop, "source", "id")) or safe_str(prop.get("mls")),
         status=safe_str(prop.get("status")),
-        description=safe_str(prop.get("text")),
-        agent_name=safe_str(prop.get("agent_name")),
-        broker_name=safe_str(prop.get("broker_name")),
-        stories=safe_int(prop.get("stories")),
-        parking_garage=safe_int(prop.get("garage")),
+        description=desc_text,
+        agent_name=safe_str(get_nested(prop, "advertisers", 0, "name")),
+        broker_name=safe_str(get_nested(prop, "advertisers", 0, "broker", "name")),
+        stories=stories,
+        parking_garage=garage,
     )
 
 
@@ -342,13 +405,26 @@ async def get_property_by_address(
     # Log the raw property data to debug field names
     logger.info(f"Found property: {address}")
     logger.info(f"Raw property keys: {list(prop.keys())}")
-    logger.info(f"Raw data - street: {prop.get('street')}, beds: {prop.get('beds')}, sqft: {prop.get('sqft')}, list_price: {prop.get('list_price')}")
+    
+    # Debug nested structures
+    location = prop.get('location', {})
+    details = prop.get('description', {})  # Note: 'description' key holds property details
+    logger.info(f"Location keys: {list(location.keys()) if isinstance(location, dict) else 'not a dict'}")
+    logger.info(f"Description/details keys: {list(details.keys()) if isinstance(details, dict) else 'not a dict'}")
+    logger.info(f"Location content: {location}")
+    logger.info(f"Description content: {details}")
+    
+    logger.info(f"Raw flat data - street: {prop.get('street')}, beds: {prop.get('beds')}, sqft: {prop.get('sqft')}, list_price: {prop.get('list_price')}")
     
     raw_photo = prop.get('primary_photo')
     extracted_url = extract_photo_url(raw_photo)
     logger.info(f"Raw primary_photo: {type(raw_photo).__name__} -> extracted URL: {extracted_url[:80] if extracted_url else 'None'}")
+    
+    # Convert and log the result
+    result = raw_property_to_response(prop)
+    logger.info(f"Parsed result - address: {result.address}, beds: {result.bedrooms}, baths: {result.bathrooms}, sqft: {result.sqft}")
     logger.info(f"=== PROPERTY REQUEST END ===")
-    return raw_property_to_response(prop)
+    return result
 
 
 @app.get("/property/url", response_model=PropertyResponse)
