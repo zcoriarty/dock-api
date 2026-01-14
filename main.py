@@ -6,9 +6,8 @@ Provides property data from Zillow, Redfin, and Realtor.com
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 from homeharvest import scrape_property
-import pandas as pd
 from enum import Enum
 import logging
 
@@ -88,8 +87,8 @@ class SearchResponse(BaseModel):
 
 
 def safe_int(value) -> Optional[int]:
-    """Safely convert to int, handling NaN and None"""
-    if pd.isna(value) or value is None:
+    """Safely convert to int, handling None"""
+    if value is None:
         return None
     try:
         return int(value)
@@ -98,8 +97,8 @@ def safe_int(value) -> Optional[int]:
 
 
 def safe_float(value) -> Optional[float]:
-    """Safely convert to float, handling NaN and None"""
-    if pd.isna(value) or value is None:
+    """Safely convert to float, handling None"""
+    if value is None:
         return None
     try:
         return float(value)
@@ -108,76 +107,94 @@ def safe_float(value) -> Optional[float]:
 
 
 def safe_str(value) -> Optional[str]:
-    """Safely convert to string, handling NaN and None"""
-    if pd.isna(value) or value is None:
+    """Safely convert to string, handling None"""
+    if value is None:
         return None
-    return str(value)
+    s = str(value)
+    return s if s else None
 
 
-def parse_alt_photos(value) -> Optional[List[str]]:
-    """Parse alt_photos which may be a string or list"""
-    if pd.isna(value) or value is None:
-        return None
-    if isinstance(value, list):
-        return value
-    if isinstance(value, str):
-        # Could be comma-separated or other format
-        return [v.strip() for v in value.split(",") if v.strip()]
-    return None
+def get_nested(data: Dict, *keys, default=None):
+    """Safely get nested dictionary values"""
+    for key in keys:
+        if isinstance(data, dict):
+            data = data.get(key)
+        else:
+            return default
+        if data is None:
+            return default
+    return data
 
 
-def df_row_to_property(row) -> PropertyResponse:
-    """Convert a DataFrame row to PropertyResponse"""
-    # Handle bathrooms - might be full_baths + half_baths or just baths
-    bathrooms = None
-    if row.get("full_baths") is not None:
-        full = safe_float(row.get("full_baths")) or 0
-        half = safe_float(row.get("half_baths")) or 0
-        bathrooms = full + (half * 0.5)
+def raw_property_to_response(prop: Dict) -> PropertyResponse:
+    """Convert a raw property dict (from return_type='raw') to PropertyResponse"""
+    # Handle bathrooms - might be full_baths + half_baths
+    full_baths = safe_float(prop.get("full_baths")) or 0
+    half_baths = safe_float(prop.get("half_baths")) or 0
+    bathrooms = full_baths + (half_baths * 0.5) if (full_baths or half_baths) else None
+    
+    # Get primary photo - this is the key field we need!
+    primary_photo = safe_str(prop.get("primary_photo"))
+    
+    # Get alt photos as list
+    alt_photos = prop.get("alt_photos")
+    if alt_photos and isinstance(alt_photos, list):
+        alt_photos = [str(p) for p in alt_photos if p]
     else:
-        bathrooms = safe_float(row.get("baths"))
+        alt_photos = None
+    
+    # Log photo info for debugging
+    logger.info(f"Property photos - primary: {primary_photo is not None}, alt_count: {len(alt_photos) if alt_photos else 0}")
     
     return PropertyResponse(
-        address=safe_str(row.get("street")),
-        city=safe_str(row.get("city")),
-        state=safe_str(row.get("state")),
-        zip_code=safe_str(row.get("zip_code")),
-        latitude=safe_float(row.get("latitude")),
-        longitude=safe_float(row.get("longitude")),
-        price=safe_float(row.get("list_price")),
-        bedrooms=safe_int(row.get("beds")),
+        address=safe_str(prop.get("street")),
+        city=safe_str(prop.get("city")),
+        state=safe_str(prop.get("state")),
+        zip_code=safe_str(prop.get("zip_code")),
+        latitude=safe_float(prop.get("latitude")),
+        longitude=safe_float(prop.get("longitude")),
+        price=safe_float(prop.get("list_price")),
+        bedrooms=safe_int(prop.get("beds")),
         bathrooms=bathrooms,
-        sqft=safe_int(row.get("sqft")),
-        lot_sqft=safe_int(row.get("lot_sqft")),
-        year_built=safe_int(row.get("year_built")),
-        property_type=safe_str(row.get("style")),
-        price_per_sqft=safe_float(row.get("ppsqft")),
-        hoa_fee=safe_float(row.get("hoa_fee")),
-        days_on_mls=safe_int(row.get("days_on_mls")),
-        list_date=safe_str(row.get("list_date")),
-        sold_price=safe_float(row.get("sold_price")),
-        last_sold_date=safe_str(row.get("last_sold_date")),
-        assessed_value=safe_float(row.get("assessed_value")),
-        estimated_value=safe_float(row.get("estimated_value")),
-        mls_id=safe_str(row.get("mls_id")),
-        listing_url=safe_str(row.get("property_url")),
-        primary_photo=safe_str(row.get("primary_photo")),
-        alt_photos=parse_alt_photos(row.get("alt_photos")),
-        source=safe_str(row.get("source")),
-        status=safe_str(row.get("status")),
-        description=safe_str(row.get("text")),
-        agent_name=safe_str(row.get("agent")),
-        broker_name=safe_str(row.get("broker")),
-        stories=safe_int(row.get("stories")),
-        parking_garage=safe_int(row.get("parking_garage")),
+        sqft=safe_int(prop.get("sqft")),
+        lot_sqft=safe_int(prop.get("lot_sqft")),
+        year_built=safe_int(prop.get("year_built")),
+        property_type=safe_str(prop.get("style")),
+        price_per_sqft=safe_float(prop.get("price_per_sqft")),
+        hoa_fee=safe_float(prop.get("hoa_fee")),
+        days_on_mls=safe_int(prop.get("days_on_mls")),
+        list_date=safe_str(prop.get("list_date")),
+        sold_price=safe_float(prop.get("sold_price")),
+        last_sold_date=safe_str(prop.get("last_sold_date")),
+        assessed_value=safe_float(prop.get("tax_assessed_value")),
+        estimated_value=safe_float(prop.get("estimated_value")),
+        mls_id=safe_str(prop.get("mls_id")),
+        listing_url=safe_str(prop.get("property_url")),
+        primary_photo=primary_photo,
+        alt_photos=alt_photos,
+        source=safe_str(prop.get("mls")),
+        status=safe_str(prop.get("status")),
+        description=safe_str(prop.get("text")),
+        agent_name=safe_str(prop.get("agent_name")),
+        broker_name=safe_str(prop.get("broker_name")),
+        stories=safe_int(prop.get("stories")),
+        parking_garage=safe_int(prop.get("garage")),
     )
 
 
-def safe_scrape(params: dict) -> Optional[pd.DataFrame]:
-    """Safely scrape properties, returning None on any error"""
+def safe_scrape(params: dict) -> Optional[List[Dict]]:
+    """Safely scrape properties using raw return type to get photos, returning None on any error"""
     try:
-        df = scrape_property(**params)
-        return df
+        # IMPORTANT: Use return_type='raw' to get primary_photo and alt_photos
+        # These fields are NOT available in the default pandas DataFrame!
+        params["return_type"] = "raw"
+        result = scrape_property(**params)
+        
+        # Raw return type returns a list of dicts
+        if result and isinstance(result, list):
+            logger.info(f"Scrape returned {len(result)} properties")
+            return result
+        return None
     except Exception as e:
         logger.warning(f"Scrape failed for params {params}: {str(e)}")
         return None
@@ -226,6 +243,7 @@ async def search_properties(
     params = {
         "location": location,
         "listing_type": listing_type.value,
+        "limit": limit,
     }
     
     if site:
@@ -235,36 +253,36 @@ async def search_properties(
         params["past_days"] = past_days
         
     # Add price filters
-    if min_price or max_price:
-        params["min_price"] = min_price
-        params["max_price"] = max_price
+    if min_price:
+        params["price_min"] = min_price
+    if max_price:
+        params["price_max"] = max_price
         
     # Add bed filters
-    if min_beds or max_beds:
-        params["min_beds"] = min_beds
-        params["max_beds"] = max_beds
+    if min_beds:
+        params["beds_min"] = min_beds
+    if max_beds:
+        params["beds_max"] = max_beds
         
     # Add bath filter
     if min_baths:
-        params["min_baths"] = min_baths
+        params["baths_min"] = min_baths
         
     # Add sqft filters
-    if min_sqft or max_sqft:
-        params["min_sqft"] = min_sqft
-        params["max_sqft"] = max_sqft
+    if min_sqft:
+        params["sqft_min"] = min_sqft
+    if max_sqft:
+        params["sqft_max"] = max_sqft
     
-    # Scrape properties with error handling
-    df = safe_scrape(params)
+    # Scrape properties with error handling (now returns list of dicts)
+    raw_properties = safe_scrape(params)
     
-    if df is None or df.empty:
+    if not raw_properties:
         logger.info(f"No properties found for {location}")
         return SearchResponse(count=0, properties=[])
     
-    # Limit results
-    df = df.head(limit)
-    
     # Convert to response
-    properties = [df_row_to_property(row) for _, row in df.iterrows()]
+    properties = [raw_property_to_response(prop) for prop in raw_properties[:limit]]
     
     logger.info(f"Found {len(properties)} properties for {location}")
     return SearchResponse(count=len(properties), properties=properties)
@@ -283,25 +301,27 @@ async def get_property_by_address(
     params = {
         "location": address,
         "listing_type": "for_sale",
+        "limit": 1,
     }
     
     if site:
         params["site_name"] = site.value
     
-    df = safe_scrape(params)
+    raw_properties = safe_scrape(params)
     
-    if df is None or df.empty:
+    if not raw_properties:
         # Try sold listings
         logger.info(f"No for_sale listings, trying sold for {address}")
         params["listing_type"] = "sold"
-        df = safe_scrape(params)
+        raw_properties = safe_scrape(params)
         
-    if df is None or df.empty:
+    if not raw_properties:
         logger.info(f"Property not found: {address}")
         raise HTTPException(status_code=404, detail="Property not found")
     
-    logger.info(f"Found property: {address}")
-    return df_row_to_property(df.iloc[0])
+    prop = raw_properties[0]
+    logger.info(f"Found property: {address}, has photo: {prop.get('primary_photo') is not None}")
+    return raw_property_to_response(prop)
 
 
 @app.get("/property/url", response_model=PropertyResponse)
@@ -365,21 +385,24 @@ async def get_property_by_url(
     params = {
         "location": location,
         "listing_type": "for_sale",
+        "limit": 1,
     }
     
     if site:
         params["site_name"] = site.value
         
-    df = safe_scrape(params)
+    raw_properties = safe_scrape(params)
     
-    if df is None or df.empty:
+    if not raw_properties:
         params["listing_type"] = "sold"
-        df = safe_scrape(params)
+        raw_properties = safe_scrape(params)
         
-    if df is None or df.empty:
+    if not raw_properties:
         raise HTTPException(status_code=404, detail="Property not found")
-        
-    return df_row_to_property(df.iloc[0])
+    
+    prop = raw_properties[0]
+    logger.info(f"Found property from URL, has photo: {prop.get('primary_photo') is not None}")
+    return raw_property_to_response(prop)
 
 
 if __name__ == "__main__":
