@@ -339,10 +339,13 @@ async def get_property_by_address(
         raise HTTPException(status_code=404, detail="Property not found")
     
     prop = raw_properties[0]
-    # Log the raw primary_photo value to debug
+    # Log the raw property data to debug field names
+    logger.info(f"Found property: {address}")
+    logger.info(f"Raw property keys: {list(prop.keys())}")
+    logger.info(f"Raw data - street: {prop.get('street')}, beds: {prop.get('beds')}, sqft: {prop.get('sqft')}, list_price: {prop.get('list_price')}")
+    
     raw_photo = prop.get('primary_photo')
     extracted_url = extract_photo_url(raw_photo)
-    logger.info(f"Found property: {address}")
     logger.info(f"Raw primary_photo: {type(raw_photo).__name__} -> extracted URL: {extracted_url[:80] if extracted_url else 'None'}")
     logger.info(f"=== PROPERTY REQUEST END ===")
     return raw_property_to_response(prop)
