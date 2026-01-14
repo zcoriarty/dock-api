@@ -134,7 +134,8 @@ def raw_property_to_response(prop: Dict) -> PropertyResponse:
     bathrooms = full_baths + (half_baths * 0.5) if (full_baths or half_baths) else None
     
     # Get primary photo - this is the key field we need!
-    primary_photo = safe_str(prop.get("primary_photo"))
+    raw_primary_photo = prop.get("primary_photo")
+    primary_photo = safe_str(raw_primary_photo)
     
     # Get alt photos as list
     alt_photos = prop.get("alt_photos")
@@ -143,8 +144,8 @@ def raw_property_to_response(prop: Dict) -> PropertyResponse:
     else:
         alt_photos = None
     
-    # Log photo info for debugging
-    logger.info(f"Property photos - primary: {primary_photo is not None}, alt_count: {len(alt_photos) if alt_photos else 0}")
+    # Log photo info for debugging - include actual URL for verification
+    logger.info(f"Property photos - raw_type: {type(raw_primary_photo).__name__}, primary: {primary_photo is not None}, url_preview: {str(primary_photo)[:80] if primary_photo else 'None'}")
     
     return PropertyResponse(
         address=safe_str(prop.get("street")),
@@ -296,6 +297,7 @@ async def get_property_by_address(
     """
     Get a specific property by its address.
     """
+    logger.info(f"=== PROPERTY REQUEST START ===")
     logger.info(f"Property request: address={address}")
     
     params = {
@@ -320,7 +322,11 @@ async def get_property_by_address(
         raise HTTPException(status_code=404, detail="Property not found")
     
     prop = raw_properties[0]
-    logger.info(f"Found property: {address}, has photo: {prop.get('primary_photo') is not None}")
+    # Log the raw primary_photo value to debug
+    raw_photo = prop.get('primary_photo')
+    logger.info(f"Found property: {address}")
+    logger.info(f"Raw primary_photo type: {type(raw_photo).__name__}, value: {str(raw_photo)[:100] if raw_photo else 'None'}")
+    logger.info(f"=== PROPERTY REQUEST END ===")
     return raw_property_to_response(prop)
 
 
