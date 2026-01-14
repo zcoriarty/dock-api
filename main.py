@@ -126,6 +126,23 @@ def get_nested(data: Dict, *keys, default=None):
     return data
 
 
+def extract_photo_url(photo_value) -> Optional[str]:
+    """Extract URL from photo value - handles both string and dict formats"""
+    if photo_value is None:
+        return None
+    
+    # HomeHarvest raw format returns photos as {'href': 'url'} dicts
+    if isinstance(photo_value, dict):
+        url = photo_value.get('href')
+        return safe_str(url)
+    
+    # If it's already a string, return as-is
+    if isinstance(photo_value, str):
+        return photo_value if photo_value else None
+    
+    return None
+
+
 def raw_property_to_response(prop: Dict) -> PropertyResponse:
     """Convert a raw property dict (from return_type='raw') to PropertyResponse"""
     # Handle bathrooms - might be full_baths + half_baths
@@ -133,19 +150,19 @@ def raw_property_to_response(prop: Dict) -> PropertyResponse:
     half_baths = safe_float(prop.get("half_baths")) or 0
     bathrooms = full_baths + (half_baths * 0.5) if (full_baths or half_baths) else None
     
-    # Get primary photo - this is the key field we need!
+    # Get primary photo - extract URL from dict if needed
     raw_primary_photo = prop.get("primary_photo")
-    primary_photo = safe_str(raw_primary_photo)
+    primary_photo = extract_photo_url(raw_primary_photo)
     
-    # Get alt photos as list
-    alt_photos = prop.get("alt_photos")
-    if alt_photos and isinstance(alt_photos, list):
-        alt_photos = [str(p) for p in alt_photos if p]
-    else:
-        alt_photos = None
+    # Get alt photos as list - each may be a dict with 'href'
+    raw_alt_photos = prop.get("alt_photos")
+    alt_photos = None
+    if raw_alt_photos and isinstance(raw_alt_photos, list):
+        alt_photos = [url for p in raw_alt_photos if (url := extract_photo_url(p))]
+        alt_photos = alt_photos if alt_photos else None
     
-    # Log photo info for debugging - include actual URL for verification
-    logger.info(f"Property photos - raw_type: {type(raw_primary_photo).__name__}, primary: {primary_photo is not None}, url_preview: {str(primary_photo)[:80] if primary_photo else 'None'}")
+    # Log photo info for debugging
+    logger.info(f"Property photos - primary_url: {primary_photo[:80] if primary_photo else 'None'}, alt_count: {len(alt_photos) if alt_photos else 0}")
     
     return PropertyResponse(
         address=safe_str(prop.get("street")),
@@ -324,8 +341,9 @@ async def get_property_by_address(
     prop = raw_properties[0]
     # Log the raw primary_photo value to debug
     raw_photo = prop.get('primary_photo')
+    extracted_url = extract_photo_url(raw_photo)
     logger.info(f"Found property: {address}")
-    logger.info(f"Raw primary_photo type: {type(raw_photo).__name__}, value: {str(raw_photo)[:100] if raw_photo else 'None'}")
+    logger.info(f"Raw primary_photo: {type(raw_photo).__name__} -> extracted URL: {extracted_url[:80] if extracted_url else 'None'}")
     logger.info(f"=== PROPERTY REQUEST END ===")
     return raw_property_to_response(prop)
 
