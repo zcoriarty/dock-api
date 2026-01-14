@@ -138,6 +138,8 @@ def extract_photo_url(photo_value, high_quality: bool = True) -> Optional[str]:
         photo_value: The photo data (string URL or dict with 'href')
         high_quality: If True, attempt to get larger image by modifying URL suffix
     """
+    import re
+    
     if photo_value is None:
         return None
     
@@ -153,14 +155,30 @@ def extract_photo_url(photo_value, high_quality: bool = True) -> Optional[str]:
         return None
     
     # Upgrade image quality for realtor.com images (rdcpix.com)
-    # Suffixes: s=small, m=medium, l=large, od=original
+    # URL patterns vary but generally have size indicators:
+    # - 's' = small (~140px), 'm' = medium (~280px), 'l' = large (~640px), 'o'/'od' = original
+    # Examples:
+    #   - https://ap.rdcpix.com/xxx/xxx-m1234567890s.jpg (small)
+    #   - https://ap.rdcpix.com/xxx/xxx-c1234-m1234567890s.jpg (small with crop)
+    #   - https://ap.rdcpix.com/xxx/xxx-w640_h480_x2-m1234567890s.jpg (small with dimensions)
     if high_quality and 'rdcpix.com' in url:
-        # Replace small/medium suffix with large
-        import re
-        # Pattern matches -s.jpg, -m.jpg at end of URL
-        url = re.sub(r'-[sm]\.jpg$', '-l.jpg', url)
-        # Also handle other patterns like 's.jpg' without dash
-        url = re.sub(r'([0-9])s\.jpg$', r'\1l.jpg', url)
+        # Pattern 1: URL ends with size indicator before .jpg
+        # Match any character sequence ending in s.jpg or m.jpg and change to l.jpg (large)
+        # The size indicator comes right before .jpg, e.g., "...123456s.jpg" or "...123456m.jpg"
+        url = re.sub(r'([0-9]+)[sm]\.jpg(\?.*)?$', r'\1l.jpg\2', url)
+        
+        # Pattern 2: Handle URLs with -s.jpg or -m.jpg suffix
+        url = re.sub(r'-[sm]\.jpg(\?.*)?$', r'-l.jpg\1', url)
+        
+        # Pattern 3: Handle width parameter in query string (e.g., ?w=140 -> ?w=1080)
+        if '?w=' in url or '&w=' in url:
+            url = re.sub(r'([?&])w=\d+', r'\1w=1080', url)
+        
+        # Pattern 4: Handle width in path (e.g., -w140_ -> -w1080_)
+        url = re.sub(r'-w\d+_', '-w1080_', url)
+        
+        # Pattern 5: Handle some URLs with 'e-' prefix for size (e.g., e-s, e-m, e-l)
+        url = re.sub(r'/e-[sm]/', '/e-l/', url)
     
     return url
 
@@ -210,8 +228,10 @@ def raw_property_to_response(prop: Dict) -> PropertyResponse:
         alt_photos = [url for p in raw_alt_photos if (url := extract_photo_url(p))]
         alt_photos = alt_photos if alt_photos else None
     
-    # Log photo info for debugging
-    logger.info(f"Property photos - primary_url: {primary_photo[:80] if primary_photo else 'None'}, alt_count: {len(alt_photos) if alt_photos else 0}")
+    # Log photo info for debugging (including original URL to verify transformation)
+    raw_primary_url = raw_primary_photo.get('href') if isinstance(raw_primary_photo, dict) else raw_primary_photo
+    logger.info(f"Property photos - original_url: {raw_primary_url[:100] if raw_primary_url else 'None'}")
+    logger.info(f"Property photos - transformed_url: {primary_photo[:100] if primary_photo else 'None'}, alt_count: {len(alt_photos) if alt_photos else 0}")
     
     # Extract address - try nested location.address first, then flat fields
     street = safe_str(address_info.get("line")) or safe_str(prop.get("street"))
