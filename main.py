@@ -131,21 +131,38 @@ def get_nested(data, *keys, default=None):
     return data
 
 
-def extract_photo_url(photo_value) -> Optional[str]:
-    """Extract URL from photo value - handles both string and dict formats"""
+def extract_photo_url(photo_value, high_quality: bool = True) -> Optional[str]:
+    """Extract URL from photo value - handles both string and dict formats
+    
+    Args:
+        photo_value: The photo data (string URL or dict with 'href')
+        high_quality: If True, attempt to get larger image by modifying URL suffix
+    """
     if photo_value is None:
         return None
+    
+    url = None
     
     # HomeHarvest raw format returns photos as {'href': 'url'} dicts
     if isinstance(photo_value, dict):
         url = photo_value.get('href')
-        return safe_str(url)
+    elif isinstance(photo_value, str):
+        url = photo_value if photo_value else None
     
-    # If it's already a string, return as-is
-    if isinstance(photo_value, str):
-        return photo_value if photo_value else None
+    if not url:
+        return None
     
-    return None
+    # Upgrade image quality for realtor.com images (rdcpix.com)
+    # Suffixes: s=small, m=medium, l=large, od=original
+    if high_quality and 'rdcpix.com' in url:
+        # Replace small/medium suffix with large
+        import re
+        # Pattern matches -s.jpg, -m.jpg at end of URL
+        url = re.sub(r'-[sm]\.jpg$', '-l.jpg', url)
+        # Also handle other patterns like 's.jpg' without dash
+        url = re.sub(r'([0-9])s\.jpg$', r'\1l.jpg', url)
+    
+    return url
 
 
 def raw_property_to_response(prop: Dict) -> PropertyResponse:
