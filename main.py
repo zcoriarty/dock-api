@@ -68,6 +68,10 @@ class PropertyResponse(BaseModel):
     last_sold_date: Optional[str] = None
     assessed_value: Optional[float] = None
     estimated_value: Optional[float] = None
+    annual_taxes: Optional[float] = None
+    tax_rate: Optional[float] = None
+    tax_history: Optional[List[Dict[str, Any]]] = None
+    price_history: Optional[List[Dict[str, Any]]] = None
     mls_id: Optional[str] = None
     listing_url: Optional[str] = None
     primary_photo: Optional[str] = None
@@ -129,6 +133,41 @@ def get_nested(data, *keys, default=None):
         if data is None:
             return default
     return data
+
+
+def first_non_empty(*values):
+    """Return the first non-empty value (None/empty string are skipped)."""
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def get_first(data, *paths):
+    """Get the first non-empty value from a list of keys or nested paths."""
+    for path in paths:
+        if isinstance(path, (list, tuple)):
+            value = get_nested(data, *path)
+        else:
+            value = data.get(path) if isinstance(data, dict) else None
+        value = first_non_empty(value)
+        if value is not None:
+            return value
+    return None
+
+
+def normalize_history(value):
+    """Normalize history fields to a list of dicts if possible."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        history = value.get("history")
+        if isinstance(history, list):
+            return history
+    return None
 
 
 def extract_photo_url(photo_value, high_quality: bool = True) -> Optional[str]:
@@ -200,9 +239,8 @@ def raw_property_to_response(prop: Dict) -> PropertyResponse:
     
     # 'description' in raw format contains property details (beds, baths, sqft, etc.)
     # This is confusing but it's how the realtor.com API works
-    details = prop.get("description") or {}
-    if not isinstance(details, dict):
-        details = {}
+    raw_description = prop.get("description")
+    details = raw_description if isinstance(raw_description, dict) else {}
     
     # Handle bathrooms - might be full_baths + half_baths or just baths
     # Try nested structure first, then fall back to flat structure
@@ -273,7 +311,103 @@ def raw_property_to_response(prop: Dict) -> PropertyResponse:
         listing_url = f"https://www.realtor.com{listing_url}"
     
     # Get description text
-    desc_text = safe_str(details.get("text")) or safe_str(prop.get("text"))
+    desc_text = (
+        safe_str(details.get("text"))
+        or safe_str(prop.get("text"))
+        or safe_str(raw_description)  # Sometimes description is a plain string
+        or safe_str(prop.get("remarks"))
+        or safe_str(prop.get("public_remarks"))
+    )
+
+    list_date = safe_str(
+        get_first(
+            prop,
+            "list_date",
+            "list_date_utc",
+            "listDate",
+            ("listing", "list_date"),
+            ("listing", "list_date_utc"),
+            ("dates", "list_date"),
+            ("dates", "listed"),
+        )
+    )
+
+    sold_price = safe_float(
+        get_first(
+            prop,
+            "sold_price",
+            "last_sold_price",
+            ("last_sold", "price"),
+            ("sale", "price"),
+        )
+    )
+
+    last_sold_date = safe_str(
+        get_first(
+            prop,
+            "last_sold_date",
+            "sold_date",
+            ("last_sold", "date"),
+            ("sale", "date"),
+        )
+    )
+
+    assessed_value = safe_float(
+        get_first(
+            prop,
+            "tax_assessed_value",
+            "assessed_value",
+            ("tax", "assessed_value"),
+            ("tax", "total_assessed_value"),
+            ("taxes", "assessed_value"),
+            ("assessment", "total"),
+        )
+    )
+
+    annual_taxes = safe_float(
+        get_first(
+            prop,
+            "annual_taxes",
+            "annual_tax",
+            "tax_amount",
+            ("tax", "amount"),
+            ("tax", "tax_amount"),
+            ("taxes", "amount"),
+            ("tax", "annual"),
+            ("taxes", "annual"),
+        )
+    )
+
+    tax_rate = safe_float(
+        get_first(
+            prop,
+            "tax_rate",
+            ("tax", "rate"),
+            ("taxes", "rate"),
+        )
+    )
+
+    price_history = normalize_history(
+        get_first(
+            prop,
+            "price_history",
+            "property_history",
+            ("property_history", "price_history"),
+            ("price_history", "history"),
+            ("property_history", "history"),
+        )
+    )
+
+    tax_history = normalize_history(
+        get_first(
+            prop,
+            "tax_history",
+            ("tax_history", "history"),
+            ("tax", "history"),
+            ("taxes", "history"),
+            ("tax", "tax_history"),
+        )
+    )
     
     return PropertyResponse(
         address=street,
@@ -292,11 +426,15 @@ def raw_property_to_response(prop: Dict) -> PropertyResponse:
         price_per_sqft=safe_float(prop.get("price_per_sqft")),
         hoa_fee=hoa_fee,
         days_on_mls=safe_int(prop.get("days_on_mls")),
-        list_date=safe_str(prop.get("list_date")),
-        sold_price=safe_float(prop.get("sold_price")) or safe_float(prop.get("last_sold_price")),
-        last_sold_date=safe_str(prop.get("last_sold_date")),
-        assessed_value=safe_float(prop.get("tax_assessed_value")),
+        list_date=list_date,
+        sold_price=sold_price,
+        last_sold_date=last_sold_date,
+        assessed_value=assessed_value,
         estimated_value=safe_float(get_nested(prop, "estimates", "estimate", "value")),
+        annual_taxes=annual_taxes,
+        tax_rate=tax_rate,
+        tax_history=tax_history,
+        price_history=price_history,
         mls_id=safe_str(prop.get("mls_id")) or safe_str(prop.get("listing_id")),
         listing_url=listing_url,
         primary_photo=primary_photo,
