@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Any, Dict
 from homeharvest import scrape_property
 from enum import Enum
+from datetime import datetime, timedelta
 import logging
 
 # Configure logging
@@ -21,6 +22,9 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Simple in-memory cache for market summaries to avoid frequent scraping.
+MARKET_SUMMARY_CACHE: Dict[str, Dict[str, Any]] = {}
+MARKET_SUMMARY_CACHE_TTL = timedelta(hours=12)
 # CORS middleware for iOS app
 app.add_middleware(
     CORSMiddleware,
@@ -90,6 +94,16 @@ class SearchResponse(BaseModel):
     properties: List[PropertyResponse]
 
 
+class MarketSummaryResponse(BaseModel):
+    city: str
+    state: str
+    average_rent: Optional[float] = None
+    median_rent: Optional[float] = None
+    new_listings_last_week: int
+    sample_size: int
+    source: str = "HomeHarvest"
+
+
 def safe_int(value) -> Optional[int]:
     """Safely convert to int, handling None"""
     if value is None:
@@ -157,6 +171,22 @@ def get_first(data, *paths):
         if value is not None:
             return value
     return None
+
+
+def median(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    values_sorted = sorted(values)
+    mid = len(values_sorted) // 2
+    if len(values_sorted) % 2 == 0:
+        return (values_sorted[mid - 1] + values_sorted[mid]) / 2
+    return values_sorted[mid]
+
+
+def average(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    return sum(values) / len(values)
 
 
 def normalize_history(value):
@@ -475,6 +505,7 @@ async def root():
         "status": "running",
         "endpoints": {
             "/search": "Search properties by location",
+            "/market-summary": "City-level rent summary for tracked markets",
             "/property": "Get property by address",
             "/health": "Health check"
         }
@@ -553,6 +584,65 @@ async def search_properties(
     
     logger.info(f"Found {len(properties)} properties for {location}")
     return SearchResponse(count=len(properties), properties=properties)
+
+
+@app.get("/market-summary", response_model=MarketSummaryResponse)
+async def market_summary(
+    city: str = Query(..., description="City name (e.g., 'Austin')"),
+    state: str = Query(..., description="State code (e.g., 'TX')"),
+    limit: int = Query(200, description="Maximum results to analyze", le=500),
+):
+    """
+    Get city-level rent summary from HomeHarvest.
+    """
+    location = f"{city}, {state}"
+    cache_key = f"{city.strip().lower()}|{state.strip().lower()}|{limit}"
+    cached = MARKET_SUMMARY_CACHE.get(cache_key)
+    now = datetime.utcnow()
+    if cached and now - cached["timestamp"] < MARKET_SUMMARY_CACHE_TTL:
+        return cached["data"]
+    logger.info(f"Market summary request: location={location}")
+    
+    rent_params = {
+        "location": location,
+        "listing_type": "for_rent",
+        "limit": limit,
+    }
+    
+    raw_rent_listings = safe_scrape(rent_params)
+    
+    rent_prices: List[float] = []
+    if raw_rent_listings:
+        for prop in raw_rent_listings:
+            price = safe_float(
+                get_first(
+                    prop,
+                    "list_price",
+                    "price",
+                    "rent",
+                    ("listing", "price"),
+                    ("listing", "list_price"),
+                )
+            )
+            if price:
+                rent_prices.append(price)
+    
+    recent_params = dict(rent_params)
+    recent_params["past_days"] = 7
+    recent_listings = safe_scrape(recent_params) or []
+    
+    response = MarketSummaryResponse(
+        city=city,
+        state=state,
+        average_rent=average(rent_prices),
+        median_rent=median(rent_prices),
+        new_listings_last_week=len(recent_listings),
+        sample_size=len(rent_prices),
+        source="HomeHarvest",
+    )
+    
+    MARKET_SUMMARY_CACHE[cache_key] = {"timestamp": now, "data": response}
+    return response
 
 
 @app.get("/property", response_model=PropertyResponse)
