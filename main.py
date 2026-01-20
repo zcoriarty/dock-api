@@ -18,6 +18,7 @@ from property_utils import (
     average,
     raw_property_to_response,
     safe_scrape,
+    extract_photo_url,
 )
 
 # Configure logging
